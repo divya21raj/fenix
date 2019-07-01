@@ -41,7 +41,6 @@ import mozilla.components.browser.session.SessionManager
 import mozilla.components.feature.app.links.AppLinksFeature
 import mozilla.components.feature.contextmenu.ContextMenuFeature
 import mozilla.components.feature.downloads.DownloadsFeature
-import mozilla.components.feature.findinpage.FindInPageFeature
 import mozilla.components.feature.intent.IntentProcessor
 import mozilla.components.feature.prompts.PromptFeature
 import mozilla.components.feature.readerview.ReaderViewFeature
@@ -67,6 +66,7 @@ import org.mozilla.fenix.collections.CreateCollectionViewModel
 import org.mozilla.fenix.collections.SaveCollectionStep
 import org.mozilla.fenix.collections.getStepForCollectionsSize
 import org.mozilla.fenix.components.FenixSnackbar
+import org.mozilla.fenix.components.FindInPageIntegration
 import org.mozilla.fenix.components.TabCollectionStorage
 import org.mozilla.fenix.components.metrics.Event
 import org.mozilla.fenix.components.metrics.Event.BrowserMenuItemTapped.Item
@@ -108,13 +108,14 @@ class BrowserFragment : Fragment(), BackHandler {
     private var tabCollectionObserver: Observer<List<TabCollection>>? = null
     private var sessionObserver: Session.Observer? = null
     private var sessionManagerObserver: SessionManager.Observer? = null
+    private var pendingOpenInBrowserIntent: Intent? = null
 
     private val sessionFeature = ViewBoundFeatureWrapper<SessionFeature>()
     private val contextMenuFeature = ViewBoundFeatureWrapper<ContextMenuFeature>()
     private val downloadsFeature = ViewBoundFeatureWrapper<DownloadsFeature>()
     private val appLinksFeature = ViewBoundFeatureWrapper<AppLinksFeature>()
     private val promptsFeature = ViewBoundFeatureWrapper<PromptFeature>()
-    private val findInPageFeature = ViewBoundFeatureWrapper<FindInPageFeature>()
+    private val findInPageIntegration = ViewBoundFeatureWrapper<FindInPageIntegration>()
     private val toolbarIntegration = ViewBoundFeatureWrapper<ToolbarIntegration>()
     private val readerViewFeature = ViewBoundFeatureWrapper<ReaderViewFeature>()
     private val sitePermissionsFeature = ViewBoundFeatureWrapper<SitePermissionsFeature>()
@@ -270,11 +271,10 @@ class BrowserFragment : Fragment(), BackHandler {
             view = view
         )
 
-        findInPageFeature.set(
-            feature = FindInPageFeature(requireComponents.core.sessionManager, view.findInPageView, view.engineView) {
-                toolbar.visibility = View.VISIBLE
-                findInPageView.visibility = View.GONE
-            },
+        findInPageIntegration.set(
+            feature = FindInPageIntegration(
+                requireComponents.core.sessionManager, customTabSessionId, view.findInPageView, view.engineView, toolbar
+            ),
             owner = this,
             view = view
         )
@@ -451,6 +451,7 @@ class BrowserFragment : Fragment(), BackHandler {
 
     @SuppressWarnings("ComplexMethod")
     override fun onResume() {
+        super.onResume()
         sessionObserver = subscribeToSession()
         sessionManagerObserver = subscribeToSessions()
         tabCollectionObserver = subscribeToTabCollections()
@@ -459,7 +460,6 @@ class BrowserFragment : Fragment(), BackHandler {
         getSessionById()?.let { updateBookmarkState(it) }
 
         if (getSessionById() == null) findNavController(this).popBackStack(R.id.homeFragment, false)
-        super.onResume()
         context?.components?.core?.let {
             val preferredColorScheme = it.getPreferredColorScheme()
             if (it.engine.settings.preferredColorScheme != preferredColorScheme) {
@@ -630,11 +630,15 @@ class BrowserFragment : Fragment(), BackHandler {
         sessionManagerObserver?.let {
             requireComponents.core.sessionManager.unregister(it)
         }
+        pendingOpenInBrowserIntent?.let {
+            startActivity(it)
+            pendingOpenInBrowserIntent = null
+        }
     }
 
     override fun onBackPressed(): Boolean {
         return when {
-            findInPageFeature.onBackPressed() -> true
+            findInPageIntegration.onBackPressed() -> true
             fullScreenFeature.onBackPressed() -> true
             readerViewFeature.onBackPressed() -> true
             sessionFeature.onBackPressed() -> true
@@ -733,13 +737,7 @@ class BrowserFragment : Fragment(), BackHandler {
                 (activity as HomeActivity).browsingModeManager.mode = BrowsingModeManager.Mode.Private
             }
             ToolbarMenu.Item.FindInPage -> {
-                toolbar.visibility = View.GONE
-                findInPageView.visibility = View.VISIBLE
-                findInPageFeature.withFeature {
-                    getSessionById()?.let { session ->
-                        it.bind(session)
-                    }
-                }
+                FindInPageIntegration.launch?.invoke()
                 requireComponents.analytics.metrics.track(Event.FindInPageOpened)
             }
             ToolbarMenu.Item.ReportIssue -> getSessionById()?.let { session ->
@@ -767,14 +765,13 @@ class BrowserFragment : Fragment(), BackHandler {
             ToolbarMenu.Item.OpenInFenix -> {
                 // To not get a "Display Already Acquired" error we need to force remove the engineView here
                 swipeRefresh?.removeView(engineView as View)
-                val intent = Intent(context, IntentReceiverActivity::class.java)
-                intent.action = Intent.ACTION_VIEW
+                pendingOpenInBrowserIntent = Intent(context, IntentReceiverActivity::class.java)
+                pendingOpenInBrowserIntent?.action = Intent.ACTION_VIEW
                 getSessionById()?.customTabConfig = null
                 getSessionById()?.let {
                     requireComponents.core.sessionManager.select(it)
                 }
                 activity?.finish()
-                startActivity(intent)
             }
         }
     }
